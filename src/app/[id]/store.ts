@@ -21,7 +21,7 @@ interface ProofState {
   setFile: (file: File | null) => Promise<void>;
   setExternalInputs: (inputs: ExternalInputInput[]) => void;
   setBlueprint: (blueprint: Blueprint) => void;
-  startProofGeneration: () => Promise<string>;
+  startProofGeneration: (isLocal: boolean) => Promise<string>;
   reset: () => void;
   setIsUserStarred: () => Promise<void>;
   isUserStarred: boolean;
@@ -83,8 +83,11 @@ export const useProofStore = create<ProofState>()(
           // TODO: Notify user about this
         }
 
+        const { blueprint } = get();
+
         try {
-          await parseEmail(content);
+          // Use ignoreBodyHashCheck if already set
+          await parseEmail(content, blueprint?.props.ignoreBodyHashCheck);
         } catch (err) {
           console.error('Failed to parse email, email is invalid: ', err);
           throw err;
@@ -100,7 +103,7 @@ export const useProofStore = create<ProofState>()(
           return;
         }
         const { blueprint } = get();
-        const userStarredSlugs = await sdk.getStarredBlueprints();
+        const userStarredSlugs = (await sdk.getStarredBlueprints()) || [];
         const isStared = userStarredSlugs.includes(blueprint!.props.slug!);
         set({ isUserStarred: isStared });
       },
@@ -111,7 +114,7 @@ export const useProofStore = create<ProofState>()(
         }
         const { blueprint } = get();
         await blueprint!.addStar();
-        const userStarredSlugs = await sdk.getStarredBlueprints();
+        const userStarredSlugs = (await sdk.getStarredBlueprints()) || [];
         const isStared = userStarredSlugs.includes(blueprint!.props.slug!);
         set({ isUserStarred: isStared });
       },
@@ -122,12 +125,12 @@ export const useProofStore = create<ProofState>()(
         }
         const { blueprint } = get();
         await blueprint!.removeStar();
-        const userStarredSlugs = await sdk.getStarredBlueprints();
+        const userStarredSlugs = (await sdk.getStarredBlueprints()) || [];
         const isStared = userStarredSlugs.includes(blueprint!.props.slug!);
         set({ isUserStarred: isStared });
       },
       // Starts the proof generation, waits for initial response and saves eml and proof to emailProofStrore
-      startProofGeneration: async () => {
+      startProofGeneration: async (isLocal = false) => {
         const { blueprint, file, externalInputs } = get();
         if (!blueprint) {
           throw new Error('Proof store not initialized yet, blueprint is not set');
@@ -137,10 +140,10 @@ export const useProofStore = create<ProofState>()(
         }
 
         // Create prover and generate proof
-        const prover = blueprint.createProver();
+        const prover = blueprint.createProver({ isLocal });
         let proof: Proof;
         try {
-          proof = await prover.generateProofRequest(file, externalInputs || []);
+          proof = await prover.generateProof(file, externalInputs || []);
           // save proof.props with blueprint.props.id as proof on useProofEmailStore here
         } catch (err) {
           console.error('Failed to generate a proof request');

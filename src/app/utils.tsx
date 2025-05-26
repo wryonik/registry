@@ -1,15 +1,16 @@
-import { parseEmail, Status } from '@zk-email/sdk';
+import { getFileContent } from '@/lib/utils';
+import { parseEmail, Status, extractEMLDetails, Blueprint } from '@zk-email/sdk';
 
 const getStatusColorLight = (status?: Status) => {
   switch (status) {
     case Status.Done:
-      return 'border border-success text-success';
+      return 'border border-green-200 text-success bg-green-100';
     case Status.InProgress:
-      return 'border border-info text-info';
+      return 'border border-purple-200 text-purple-300 bg-purple-100';
     case Status.Draft:
-      return 'border border-warning text-warning';
+      return 'border border-yellow-200 text-yellow-300 bg-yellow-100';
     case Status.Failed:
-      return 'border border-red-400 text-red-400';
+      return 'border border-red-200 text-red-500 bg-red-100';
     default:
       return 'border border-grey-100 text-grey-800';
   }
@@ -112,66 +113,62 @@ const formatDateAndTime = (date: Date) => {
   });
 };
 
-async function extractEMLDetails(emlContent: string) {
-  const headers: Record<string, string> = {};
-  const lines = emlContent.split('\n');
+/**
+ * Creates a debounced function that delays invoking func until after wait milliseconds have elapsed
+ * since the last time the debounced function was invoked.
+ *
+ * @param func The function to debounce
+ * @param wait The number of milliseconds to delay
+ * @returns A debounced version of the function
+ */
+function debounce<T extends (...args: any[]) => any>(
+  func: T,
+  wait: number
+): T & { cancel: () => void } {
+  let timeout: NodeJS.Timeout | null = null;
 
-  let headerPart = true;
-  let headerLines = [];
-
-  // Parse headers
-  for (let line of lines) {
-    if (headerPart) {
-      if (line.trim() === '') {
-        headerPart = false; // End of headers
-      } else {
-        headerLines.push(line);
-      }
+  const debounced = (...args: Parameters<T>) => {
+    if (timeout) {
+      clearTimeout(timeout);
     }
-  }
 
-  // Join multi-line headers and split into key-value pairs
-  const joinedHeaders = headerLines
-    .map((line) =>
-      line.startsWith(' ') || line.startsWith('\t') ? line.trim() : `\n${line.trim()}`
-    )
-    .join('')
-    .split('\n');
+    timeout = setTimeout(() => {
+      timeout = null;
+      func(...args);
+    }, wait);
+  };
 
-  joinedHeaders.forEach((line) => {
-    const [key, ...value] = line.split(':');
-    if (key) headers[key.trim()] = value.join(':').trim();
-  });
+  debounced.cancel = () => {
+    if (timeout) {
+      clearTimeout(timeout);
+      timeout = null;
+    }
+  };
 
-  const senderDomain =
-    headers['From']
-      ?.match(/@([^\s>]+)/)?.[1]
-      ?.split('.')
-      .slice(-2)
-      .join('.') || null;
-  const selector = getDKIMSelector(emlContent);
-  const emailQuery = `from:${senderDomain}`;
-  const parsedEmail = await parseEmail(emlContent);
-  const emailBodyMaxLength = parsedEmail.cleanedBody.length;
-  const headerLength = parsedEmail.canonicalizedHeader.length;
-
-  return { senderDomain, headerLength, selector, emailQuery, emailBodyMaxLength };
+  return debounced as T & { cancel: () => void };
 }
 
-const getMaxEmailBodyLength = async (emlContent: string, shaPrecomputeSelector: string) => {
-  const parsedEmail = await parseEmail(emlContent);
+// TODO: This should be moved to the SDK
+const findOrCreateDSP = async (file: File) => {
+  const content = await getFileContent(file);
 
-  const body = parsedEmail.cleanedBody;
-  const index = body.indexOf(shaPrecomputeSelector);
-
-  if (index === -1) {
-    return body.length;
+  const dkimPair = getSenderDomainAndSelectorPair(content);
+  if (!dkimPair) {
+    return null;
   }
+  const response = await fetch('https://archive.zk.email/api/dsp', {
+    method: 'POST',
+    body: JSON.stringify({
+      domain: dkimPair.domain,
+      selector: dkimPair.selector,
+    }),
+  });
 
-  return body.length - index - shaPrecomputeSelector.length;
+  return response;
 };
 
-const getDKIMSelector = (emlContent: string): string | null => {
+// TODO: This should be moved to the SDK
+const getSenderDomainAndSelectorPair = (emlContent: string) => {
   const headerLines: string[] = [];
   const lines = emlContent.split('\n');
   for (const line of lines) {
@@ -187,14 +184,52 @@ const getDKIMSelector = (emlContent: string): string | null => {
   // Then look for DKIM-Signature in the joined headers
   for (const line of headerLines) {
     if (line.includes('DKIM-Signature')) {
-      const match = line.match(/s=([^;]+)/);
-      if (match && match[1]) {
-        return match[1].trim();
+      const selectorMatch = line.match(/s=([^;]+)/);
+      const domainMatch = line.match(/d=([^;]+)/);
+      if (selectorMatch && domainMatch) {
+        return {
+          selector: selectorMatch[1].trim(),
+          domain: domainMatch[1].trim(),
+        };
       }
     }
   }
   return null;
 };
+
+function getCombinedBlueprintStatus(blueprint: Blueprint | null) {
+  if (blueprint === null) {
+    return Status.Draft;
+  }
+
+  if (
+    blueprint.props.clientStatus === Status.Done &&
+    blueprint.props.serverStatus === Status.Done
+  ) {
+    return Status.Done;
+  }
+
+  if (
+    blueprint.props.clientStatus === Status.InProgress ||
+    blueprint.props.serverStatus === Status.InProgress
+  ) {
+    return Status.InProgress;
+  }
+
+  if (
+    blueprint.props.clientStatus === Status.Draft ||
+    blueprint.props.serverStatus === Status.Draft
+  ) {
+    return Status.Draft;
+  }
+
+  if (
+    blueprint.props.clientStatus === Status.Failed ||
+    blueprint.props.serverStatus === Status.Failed
+  ) {
+    return Status.Failed;
+  }
+}
 
 export {
   getStatusColorLight,
@@ -203,7 +238,7 @@ export {
   getStatusName,
   formatDate,
   formatDateAndTime,
-  extractEMLDetails,
-  getMaxEmailBodyLength,
-  getDKIMSelector,
+  debounce,
+  findOrCreateDSP,
+  getCombinedBlueprintStatus,
 };

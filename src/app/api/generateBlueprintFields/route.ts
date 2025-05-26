@@ -51,6 +51,7 @@ Key Requirements:
 - Break the match into public and private sections
 - Private parts (isPublic: false) typically match static text
 - Public parts (isPublic: true) capture the desired information
+- For DKIM signatures: When two signatures are present, ALWAYS use the second one. If only one signature exists, use that one.
 
 3. Regex Pattern Rules:
 - JSON special characters need single backslash escape: \\"
@@ -59,6 +60,9 @@ Key Requirements:
 - Consider word boundaries for accuracy: \\\\b
 - Use character classes when needed: [^\\\\n]+
 - Characters that don't use backslash scape: <, >, /
+- For DKIM-related patterns, use this pattern to conditionally match second signature if it exists:
+  "(\\\\r\\n|^)dkim-signature:(?:.*?\\\\r\\ndkim-signature:)?"
+  This will match either one or two signatures, preferring the second one when available.
 
 4. Rules:
 - When asked for email sender, email recipient, email subject or email timestamp, you must use the provide template without modify.
@@ -155,7 +159,7 @@ For extracting the email recipient use exactly:
         },
         {
           "isPublic": false,
-          "regexDef": "([^\\r\\n]+<)?"
+          "regexDef": "([^<\r\n]*?\\s*)?<?"
         },
         {
           "isPublic": true,
@@ -226,6 +230,36 @@ For extracting the email timestamp use exactly:
   ]
 }
 
+For extracting DKIM signatures, follow these priority rules:
+1. If multiple DKIM signatures exist, exclude any that are from amazonses
+2. Among the remaining signatures, select the one where the domain has the most overlapping contiguous characters with the sender's email domain
+3. If there's still a tie, use the first matching signature
+
+The DKIM signature pattern should use exactly:
+{
+  "values": [
+    {
+      "name": "dkim_signature",
+      "parts": [
+        {
+          "isPublic": false,
+          "regexDef": "(\\r\\n|^)dkim-signature:[^\\r\\n]*?d="
+        },
+        {
+          "isPublic": true,
+          "regexDef": "[^;\\r\\n]+"
+        },
+        {
+          "isPublic": false,
+          "regexDef": ";"
+        }
+      ],
+      "location": "dkim",
+      "maxLength": 128
+    }
+  ]
+}
+
 For each extraction goal, please:
 1. Create a value object with appropriate name
 2. Break the match into logical public/private parts
@@ -240,19 +274,17 @@ export async function POST(request: Request) {
   try {
     // Extract form data from the request
     const formData = await request.formData();
-    const file = formData.get('emlFile') as File;
+    const emailContent = formData.get('emlFile') as string;
     const extractionGoals = formData.get('extractionGoals');
 
     // Validate required fields are present
-    if (!file || !extractionGoals) {
+    if (!emailContent || !extractionGoals) {
       return NextResponse.json(
         { error: 'Missing email file or extraction goals' },
         { status: 400 }
       );
     }
 
-    // Get email content as text and prepare prompt by replacing placeholders
-    const emailContent = await file.text();
     const promptWithReplacements = PROMPT
       .replace('{{EMAIL_CONTENT}}', emailContent)
       .replace('{{EXTRACTION_GOALS}}', extractionGoals.toString());

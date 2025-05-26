@@ -9,10 +9,12 @@ import { AnimatePresence, motion } from 'framer-motion'; // Add this import
 import { useProofStore } from './store';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { useCreateBlueprintStore } from '../create/[id]/store';
-import { testBlueprint } from '@zk-email/sdk';
+import { extractEMLDetails, testBlueprint, ZkFramework } from '@zk-email/sdk';
 import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import Loader from '@/components/ui/loader';
 import { decodeMimeEncodedText } from '@/lib/utils';
+import { Loader2 } from 'lucide-react';
+import { toast } from 'react-toastify';
 
 type Email = RawEmailResponse & {
   valid: boolean;
@@ -26,11 +28,12 @@ const SelectEmails = ({ id }: { id: string }) => {
   const { replace } = useRouter();
   const searchParams = useSearchParams();
 
-  const [isCreateProofLoading, setIsCreateProofLoading] = useState(false);
+  const [isCreateProofLoading, setIsCreateProofLoading] = useState<'local' | 'remote' | null>(null);
   const [isFetchEmailLoading, setIsFetchEmailLoading] = useState(false);
   const [pageToken, setPageToken] = useState<string | null>('0');
   const [fetchedEmails, setFetchedEmails] = useState<Email[]>([]);
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
+  const [hasExternalInputs, setHasExternalInputs] = useState(false);
   const { googleAuthToken } = useGoogleAuth();
 
   useEffect(() => {
@@ -42,6 +45,12 @@ const SelectEmails = ({ id }: { id: string }) => {
       reset();
     };
   }, []);
+
+  useEffect(() => {
+    setHasExternalInputs(
+      !!blueprint?.props.externalInputs && !!blueprint?.props.externalInputs.length
+    );
+  }, [blueprint]);
 
   const handleValidateEmail = async (content: string) => {
     try {
@@ -65,10 +74,10 @@ const SelectEmails = ({ id }: { id: string }) => {
     }
   };
 
-  const handleStartProofGeneration = async () => {
-    setIsCreateProofLoading(true);
+  const handleStartProofGeneration = async (isLocal = false) => {
+    setIsCreateProofLoading(isLocal ? 'local' : 'remote');
     try {
-      const proofId = await startProofGeneration();
+      const proofId = await startProofGeneration(isLocal);
       // setStep('3');
       const params = new URLSearchParams(searchParams);
       params.set('proofId', proofId);
@@ -77,8 +86,13 @@ const SelectEmails = ({ id }: { id: string }) => {
       replace(`${pathname}?${params.toString()}`);
     } catch (error) {
       console.error('Error in starting proof generation: ', error);
+      if (isLocal) {
+        toast.error('Error: Local proof generation failed');
+      } else {
+        toast.error('Error: Remote proof generation failed');
+      }
     } finally {
-      setIsCreateProofLoading(false);
+      setIsCreateProofLoading(null);
     }
   };
 
@@ -92,9 +106,15 @@ const SelectEmails = ({ id }: { id: string }) => {
         const selectedEmail = {
           emailMessageId: 'uploadedFile',
           subject,
-          internalDate: file.match(/Date: (.*)/)?.[1]
-            ? new Date(file.match(/Date: (.*)/)?.[1] as string).toISOString()
-            : 'Invalid Date',
+          internalDate: (() => {
+            const dateMatches = file.match(/\nDate: (.*)/g); // Find all "Date:" occurrences
+            if (dateMatches && dateMatches.length > 0) {
+              const lastDateMatch = dateMatches[0]; // Take the first match - should get the header date
+              const dateValue = lastDateMatch.split('Date: ')[1]; // Extract the actual date string
+              return new Date(dateValue).toISOString(); // Convert to ISO format
+            }
+            return 'Invalid Date';
+          })(),
           decodedContents: file,
           valid: valid ?? false,
         };
@@ -117,14 +137,54 @@ const SelectEmails = ({ id }: { id: string }) => {
         q: blueprint?.props.emailQuery,
       });
 
+      console.log('emailQuery: ', blueprint?.props.emailQuery);
+
       const emailResponseMessages = emailListResponse.messages;
       if (emailResponseMessages?.length > 0) {
         const emailIds = emailResponseMessages.map((message) => message.id);
         const emails = await fetchEmailsRaw(googleAuthToken.access_token, emailIds);
 
-        const validatedEmails: Email[] = await Promise.all(
+        const validatedEmails: {
+          email: RawEmailResponse;
+          senderDomain: string;
+          selector: string;
+        }[] = await Promise.all(
           emails.map(async (email) => {
-            console.log('email', email);
+            const { senderDomain, selector } = await extractEMLDetails(email.decodedContents);
+            return {
+              email,
+              senderDomain,
+              selector,
+            };
+          })
+        );
+
+        // Get unique domain-selector pairs
+        const uniquePairs = Array.from(
+          new Set(
+            validatedEmails.map(({ senderDomain, selector }) => `${senderDomain}:${selector}`)
+          )
+        ).map((pair) => {
+          const [domain, selector] = pair.split(':');
+          return { domain, selector };
+        });
+
+        // Make API calls only for unique pairs
+        await Promise.all(
+          uniquePairs.map((pair) =>
+            fetch('https://archive.zk.email/api/dsp', {
+              method: 'POST',
+              body: JSON.stringify({
+                domain: pair.domain,
+                selector: pair.selector,
+              }),
+            })
+          )
+        );
+
+        // Process validation for all emails
+        const processedEmails: Email[] = await Promise.all(
+          validatedEmails.map(async ({ email }) => {
             const validationResult = await handleValidateEmail(email.decodedContents);
             return {
               ...email,
@@ -133,8 +193,14 @@ const SelectEmails = ({ id }: { id: string }) => {
           })
         );
 
+        if (validatedEmails.length === 0 && emailListResponse.nextPageToken) {
+          setPageToken(emailListResponse.nextPageToken || null);
+          handleFetchEmails();
+          return;
+        }
+
         console.log('fetchedEmails: ', fetchedEmails, validatedEmails);
-        setFetchedEmails([...fetchedEmails, ...validatedEmails]);
+        setFetchedEmails([...fetchedEmails, ...processedEmails]);
 
         setPageToken(emailListResponse.nextPageToken || null);
       } else {
@@ -167,9 +233,17 @@ const SelectEmails = ({ id }: { id: string }) => {
 
     if (fetchedEmails.filter((email) => email.valid).length === 0) {
       return (
-        <div className="border-grey-200 rounded-lg border p-4 text-grey-700">
-          No valid emails found. Please check your inbox
-        </div>
+        <Image
+          src="/assets/noEmailIllustration.svg"
+          alt="no valid emails found"
+          width={316}
+          height={316}
+          style={{
+            margin: 'auto',
+            maxWidth: '100%',
+            height: 'auto',
+          }}
+        />
       );
     }
 
@@ -261,40 +335,134 @@ const SelectEmails = ({ id }: { id: string }) => {
           </RadioGroup>
         </div>
         <div className="mt-6 flex w-full flex-col items-center gap-4">
-          <Button
-            variant="ghost"
-            className="gap-2 text-grey-700"
-            onClick={handleFetchEmails}
-            disabled={isFetchEmailLoading}
-          >
-            <Image
-              src="/assets/ArrowsClockwise.svg"
-              alt="arrow down"
-              width={16}
-              height={16}
-              className={isFetchEmailLoading ? 'animate-spin' : ''}
-              style={{
-                maxWidth: '100%',
-                height: 'auto',
-              }}
-            />
-            Load More Emails
-          </Button>
+          {!file ? (
+            <Button
+              variant="ghost"
+              className="gap-2 text-grey-700"
+              onClick={handleFetchEmails}
+              disabled={isFetchEmailLoading}
+            >
+              <Image
+                src="/assets/ArrowsClockwise.svg"
+                alt="arrow down"
+                width={16}
+                height={16}
+                className={isFetchEmailLoading ? 'animate-spin' : ''}
+                style={{
+                  maxWidth: '100%',
+                  height: 'auto',
+                }}
+              />
+              Load More Emails
+            </Button>
+          ) : null}
 
-          <Button
-            className="flex w-max items-center gap-2"
-            disabled={selectedEmail === null}
-            loading={isCreateProofLoading}
-            onClick={() => {
-              if (blueprint!.props.externalInputs && blueprint!.props.externalInputs.length) {
-                setStep('2');
-              } else {
-                handleStartProofGeneration();
-              }
-            }}
-          >
-            {blueprint?.props.externalInputs ? 'Add Inputs' : 'Create Proof Remotely'}
-          </Button>
+          {!hasExternalInputs && (
+            <div className="flex justify-center">Choose the mode of proof creation</div>
+          )}
+          {hasExternalInputs ? (
+            <Button
+              className="flex items-center gap-2"
+              disabled={selectedEmail === null || !!isCreateProofLoading}
+              loading={isCreateProofLoading === 'remote'}
+              onClick={() => {
+                if (blueprint!.props.externalInputs && blueprint!.props.externalInputs.length) {
+                  setStep('2');
+                } else {
+                  handleStartProofGeneration(false);
+                }
+              }}
+            >
+              Add Inputs
+            </Button>
+          ) : (
+            <div className="flex flex-col gap-4">
+              <div
+                data-testid="remote-proving"
+                className={`rounded-2xl border border-grey-200 p-6 ${
+                  selectedEmail === null || !!isCreateProofLoading
+                    ? 'cursor-not-allowed bg-neutral-100'
+                    : 'cursor-pointer'
+                }`}
+                onClick={() => {
+                  if (selectedEmail === null || !!isCreateProofLoading) return;
+                  handleStartProofGeneration(false);
+                }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <p className="flex flex-row items-center justify-center gap-2 text-xl">
+                    Remote Proving
+                    {isCreateProofLoading === 'remote' && (
+                      <span>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      </span>
+                    )}
+                  </p>
+
+                  <div className="flex flex-row gap-2">
+                    <div className="rounded-lg border border-[#C2F6C7] bg-[#ECFFEE] px-2 py-1 text-sm text-[#3AA345]">
+                      Quick
+                    </div>
+                    <div className="rounded-lg border border-[#FFDBDE] bg-[#FFF6F7] px-2 py-1 text-sm text-[#C71B16]">
+                      Server Side
+                    </div>
+                  </div>
+                </div>
+                <p className="text-base text-grey-700">
+                  This method is comparatively faster. But the email is sent to our servers
+                  temporarily and then deleted right after the proof creation.
+                </p>
+              </div>
+              <div
+                data-testid="local-proving"
+                className={`rounded-2xl border border-grey-200 p-6 ${
+                  selectedEmail === null ||
+                  !!isCreateProofLoading ||
+                  !blueprint?.props.clientZkFramework ||
+                  // @ts-ignore ZkFramework can be None
+                  blueprint?.props.clientZkFramework === ZkFramework.None
+                    ? 'cursor-not-allowed bg-neutral-100'
+                    : 'cursor-pointer'
+                }`}
+                onClick={() => {
+                  if (selectedEmail === null || !!isCreateProofLoading) return;
+                  handleStartProofGeneration(true);
+                }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <p className="flex flex-row items-center justify-center gap-2 text-xl">
+                    Local Proving{' '}
+                    {isCreateProofLoading === 'local' && (
+                      <span>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      </span>
+                    )}
+                  </p>
+                  <div className="flex flex-row gap-2">
+                    <div className="rounded-lg border border-[#C2F6C7] bg-[#ECFFEE] px-2 py-1 text-sm text-[#3AA345]">
+                      Private
+                    </div>
+                    <div className="rounded-lg border border-[#FFDBDE] bg-[#FFF6F7] px-2 py-1 text-sm text-[#C71B16]">
+                      Slow
+                    </div>
+                  </div>
+                </div>
+                <p className="text-base text-grey-700">
+                  {blueprint?.props.serverZkFramework &&
+                  // @ts-ignore ZkFramework can be None
+                  blueprint?.props.serverZkFramework !== ZkFramework.None ? (
+                    <>
+                      This method prioritizes your privacy by generating proofs directly on your
+                      device. While it may take a bit more time, your email remains securely on your
+                      system.
+                    </>
+                  ) : (
+                    'Local proving only works for blueprints compiled with Circom'
+                  )}
+                </p>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -304,14 +472,22 @@ const SelectEmails = ({ id }: { id: string }) => {
     <div className="flex flex-col items-center justify-center gap-6">
       <div className="flex w-full flex-col gap-1">
         <h4 className="text-xl font-bold text-grey-800">Select Emails</h4>
-        <p className="text-base font-medium text-grey-700">
-          Choose the emails you want to create proofs for. You can select multiple emails.
-        </p>
-        <p className="text-base font-medium text-grey-700">
-          <span className="text-grey-900 underline">Note</span> - If you select to create the proofs
-          remotely, your emails will be sent to our secured service for proof generation. Emails
-          will be deleted once the proofs are generated
-        </p>
+        {fetchedEmails.filter((email) => email.valid).length === 0 && !isFetchEmailLoading ? (
+          <p className="text-base font-medium text-grey-700">
+            No matching emails were found in your inbox
+          </p>
+        ) : (
+          <>
+            <p className="text-base font-medium text-grey-700">
+              Choose the emails you want to create proofs for.
+            </p>
+            <p className="text-base font-medium text-grey-700">
+              <span className="font-bold text-grey-900">Note</span> - If you select to create the
+              proofs remotely, your emails will be sent to our secured service for proof generation.
+              Emails will be deleted once the proofs are generated
+            </p>
+          </>
+        )}
       </div>
 
       {renderEmailsTable()}

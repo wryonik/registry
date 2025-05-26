@@ -1,7 +1,7 @@
 'use client';
 import { use, useEffect } from 'react';
-import Image from "next/image";
-import { getDateToNowStr, getStatusColorLight, getStatusIcon, getStatusName } from '../utils';
+import Image from 'next/image';
+import { getStatusColorLight, getStatusIcon, getStatusName } from '../utils';
 import { Button } from '@/components/ui/button';
 import Stepper from '../components/Stepper';
 import ConnectEmails from './ConnectEmails';
@@ -17,6 +17,7 @@ import StepperMobile from '../components/StepperMobile';
 import { BlueprintTitle } from '../components/BlueprintTitle';
 import { Blueprint, Status } from '@zk-email/sdk';
 import { toast } from 'react-toastify';
+import { useAuthStore } from '@/lib/stores/useAuthStore';
 
 const Pattern = ({ params }: { params: Promise<{ id: string }> }) => {
   const { id } = use(params);
@@ -33,6 +34,7 @@ const Pattern = ({ params }: { params: Promise<{ id: string }> }) => {
   const blueprint = useProofStore((state) => state.blueprint);
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { clearAuth } = useAuthStore();
 
   let steps = blueprint?.props.externalInputs
     ? ['Connect emails', 'Select emails', 'Add inputs', 'View and verify']
@@ -51,7 +53,13 @@ const Pattern = ({ params }: { params: Promise<{ id: string }> }) => {
         await setIsUserStarred();
       })
       .catch((err) => {
+        if (err.toString().includes('401')) {
+          clearAuth();
+          return;
+        }
         console.error(`Failed to get blueprint with id ${id}: `, err);
+        toast.error('This blueprint could not be found');
+        router.push('/');
       });
   }, []);
 
@@ -74,28 +82,35 @@ const Pattern = ({ params }: { params: Promise<{ id: string }> }) => {
     );
   }
 
-  if (blueprint?.props.status === Status.Draft) {
+  if (
+    blueprint?.props.clientStatus === Status.Draft ||
+    blueprint?.props.serverStatus === Status.Draft
+  ) {
     router.push(`/${id}/versions`);
   }
 
   const renderBlueprintComponent = () => {
-    if (blueprint.props.status === Status.InProgress) {
+    if (
+      blueprint.props.clientStatus === Status.InProgress ||
+      blueprint.props.serverStatus === Status.InProgress
+    ) {
       return (
-        (<div className="flex flex-col gap-1 rounded-3xl border border-grey-500 bg-white p-6 shadow-[2px_4px_2px_0px_rgba(0,0,0,0.02),_2px_3px_4.5px_0px_rgba(0,0,0,0.07)]">
+        <div className="flex flex-col gap-1 rounded-3xl border border-grey-500 bg-white p-6 shadow-[2px_4px_2px_0px_rgba(0,0,0,0.02),_2px_3px_4.5px_0px_rgba(0,0,0,0.07)]">
           <h4 className="text-lg font-bold text-grey-800">Compilation in progress</h4>
           <p className="text-base font-medium text-grey-700">
             The blueprint compilation is in progress and will take few hours to complete{' '}
           </p>
           <Image
-            src="/assets/CompilationInProgress.png"
+            src="/assets/CompilationInProgress.svg"
             alt="compilation failed"
-            width={560}
-            height={340}
+            width={280}
+            height={280}
             style={{
               margin: 'auto',
-              maxWidth: "100%",
-              height: "auto"
-            }} />
+              maxWidth: '100%',
+              height: 'auto',
+            }}
+          />
           <Button
             startIcon={
               <Image
@@ -105,9 +120,10 @@ const Pattern = ({ params }: { params: Promise<{ id: string }> }) => {
                 height={16}
                 style={{
                   color: 'red',
-                  maxWidth: "100%",
-                  height: "auto"
-                }} />
+                  maxWidth: '100%',
+                  height: 'auto',
+                }}
+              />
             }
             variant="destructive"
             className="mx-auto w-max"
@@ -115,35 +131,86 @@ const Pattern = ({ params }: { params: Promise<{ id: string }> }) => {
           >
             Cancel Compilation
           </Button>
-        </div>)
+        </div>
       );
     }
 
-    if (blueprint.props.status === Status.Failed) {
+    if (
+      blueprint.props.clientStatus === Status.Failed ||
+      blueprint.props.serverStatus === Status.Failed
+    ) {
       return (
-        (<div className="flex flex-col gap-1 rounded-3xl border border-grey-500 bg-white p-6 shadow-[2px_4px_2px_0px_rgba(0,0,0,0.02),_2px_3px_4.5px_0px_rgba(0,0,0,0.07)]">
+        <div className="flex flex-col gap-1 rounded-3xl border border-grey-500 bg-white p-6 shadow-[2px_4px_2px_0px_rgba(0,0,0,0.02),_2px_3px_4.5px_0px_rgba(0,0,0,0.07)]">
           <h4 className="text-lg font-bold text-grey-800">Compilation Failed :(</h4>
           <p className="text-base font-medium text-grey-700">
             The blueprint failed due to some technical reasons. Please recompile again.
           </p>
           <Image
-            src="/assets/CompilationFailed.png"
+            src="/assets/CompilationFailed.svg"
             alt="compilation failed"
-            width={560}
-            height={340}
+            width={316}
+            height={316}
             style={{
               margin: 'auto',
-              maxWidth: "100%",
-              height: "auto"
-            }} />
-        </div>)
+              maxWidth: '100%',
+              height: 'auto',
+            }}
+          />
+          <div className="flex w-full justify-center">
+            <Button
+              onClick={() => router.push(`/create/${blueprint.props.id}`)}
+              variant="secondary"
+              startIcon={
+                <Image
+                  src="/assets/Edit.svg"
+                  alt="Edit"
+                  width={16}
+                  height={16}
+                  style={{
+                    maxWidth: '100%',
+                    height: 'auto',
+                  }}
+                />
+              }
+              size="sm"
+            >
+              Edit blueprint
+            </Button>
+          </div>
+        </div>
       );
     }
 
-    if (blueprint.props.status === Status.Done) {
+    if (
+      blueprint.props.clientStatus === Status.Done ||
+      blueprint.props.serverStatus === Status.Done
+    ) {
       return (
-        (<div className="flex flex-col gap-6 rounded-3xl border border-grey-500 bg-white p-6 shadow-[2px_4px_2px_0px_rgba(0,0,0,0.02),_2px_3px_4.5px_0px_rgba(0,0,0,0.07)]">
-          <h4 className="text-lg font-bold text-grey-800">Generate Proof</h4>
+        <div className="flex flex-col gap-6 rounded-3xl border border-grey-400 bg-white p-6">
+          <div className="flex items-center justify-between">
+            <h4 className="text-lg font-bold text-grey-800">Generate Proof</h4>
+            <Link href={`/${id}/proofs`}>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="border border-grey-400 bg-white text-grey-800 hover:bg-grey-100"
+                startIcon={
+                  <Image
+                    src="/assets/Files.svg"
+                    alt="proofs"
+                    width={16}
+                    height={16}
+                    style={{
+                      maxWidth: '100%',
+                      height: 'auto',
+                    }}
+                  />
+                }
+              >
+                Past proofs
+              </Button>
+            </Link>
+          </div>
           <div className="flex flex-col items-center gap-6 md:hidden">
             <StepperMobile steps={steps} currentStep={step} />
           </div>
@@ -163,15 +230,18 @@ const Pattern = ({ params }: { params: Promise<{ id: string }> }) => {
             <div className="flex w-auto">
               <Button
                 variant="ghost"
-                startIcon={<Image
-                  src="/assets/ArrowLeft.svg"
-                  alt="back"
-                  width={16}
-                  height={16}
-                  style={{
-                    maxWidth: "100%",
-                    height: "auto"
-                  }} />}
+                startIcon={
+                  <Image
+                    src="/assets/ArrowLeft.svg"
+                    alt="back"
+                    width={16}
+                    height={16}
+                    style={{
+                      maxWidth: '100%',
+                      height: 'auto',
+                    }}
+                  />
+                }
                 onClick={() => {
                   const newStep = parseInt(step) - 1;
                   if (steps.length === 3 && newStep === 2) {
@@ -189,13 +259,13 @@ const Pattern = ({ params }: { params: Promise<{ id: string }> }) => {
           {step === '1' && <SelectEmails id={id} />}
           {step === '2' && <AddInputs />}
           {step === '3' && <ViewProof />}
-        </div>)
+        </div>
       );
     }
   };
 
   return (
-    (<div className="mx-auto flex flex-col gap-10 py-16">
+    <div className="mx-auto flex flex-col gap-10 py-16">
       {/* <div className="fixed left-1/2 top-4 z-50 -translate-x-1/2 rounded-lg bg-warning px-4 py-2 text-white shadow-lg">
         <p className="text-sm font-medium">
           🚧 This feature is currently in beta. Some functionality may be limited or subject to
@@ -209,68 +279,9 @@ const Pattern = ({ params }: { params: Promise<{ id: string }> }) => {
           unStarBlueprint={unStarBlueprint}
           starBlueprint={starBlueprint}
         />
-        <div className="flex flex-col items-start justify-between gap-4 md:flex-row">
-          <div className="flex flex-row items-center justify-between gap-3">
-            <span className="text-xl font-bold leading-6 underline">{blueprint.props.version}</span>
-            <span>
-              <p className="text-xs text-grey-700">
-                Updated {getDateToNowStr(blueprint.props.updatedAt)}
-              </p>
-            </span>
-            <span>
-              <span
-                className={`flex flex-row gap-1 rounded-full border border-[#34C759] bg-white px-2 py-1 text-xs font-semibold text-[#34C759]`}
-              >
-                Latest
-              </span>
-            </span>
-          </div>
-          <div className="flex w-auto flex-row gap-2">
-            <Link href={`/${id}/versions`}>
-              <Button
-                variant="secondary"
-                size="sm"
-                className="bg-white"
-                onClick={() => {}}
-                startIcon={
-                  <Image
-                    src="/assets/GitCommit.svg"
-                    alt="commit"
-                    width={16}
-                    height={16}
-                    style={{
-                      maxWidth: "100%",
-                      height: "auto"
-                    }} />
-                }
-              >
-                View all versions
-              </Button>
-            </Link>
-            <Link href={`/${id}/proofs`}>
-              <Button
-                variant="secondary"
-                size="sm"
-                className="bg-white"
-                onClick={() => {}}
-                startIcon={<Image
-                  src="/assets/Files.svg"
-                  alt="commit"
-                  width={16}
-                  height={16}
-                  style={{
-                    maxWidth: "100%",
-                    height: "auto"
-                  }} />}
-              >
-                Past proofs
-              </Button>
-            </Link>
-          </div>
-        </div>
       </>
       {renderBlueprintComponent()}
-    </div>)
+    </div>
   );
 };
 

@@ -1,9 +1,10 @@
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import Loader from '@/components/ui/loader';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import Image from "next/image";
+import Image from 'next/image';
 
 const DragAndDropFile = ({
   accept,
@@ -11,19 +12,23 @@ const DragAndDropFile = ({
   helpText,
   file,
   setFile,
+  id,
   errorMessage,
+  loading,
   tooltipComponent,
 }: {
   accept: string;
   title?: string;
   helpText?: string;
   file: File | null;
-  setFile: (file: File | null) => void;
-  errorMessage: string;
+  setFile: (file: File | null) => void | Promise<void>;
+  id?: string;
+  errorMessage?: string;
   tooltipComponent?: React.ReactNode;
+  loading?: boolean;
 }) => {
   return (
-    (<div className="flex w-full flex-col gap-4">
+    <div className="flex w-full flex-col gap-4">
       {title ? (
         <div className="flex flex-row gap-2">
           <Label className="text-base text-grey-900" htmlFor={title}>
@@ -49,6 +54,7 @@ const DragAndDropFile = ({
           e.preventDefault();
           e.stopPropagation();
         }}
+        id={id}
         onDrop={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -62,7 +68,9 @@ const DragAndDropFile = ({
         }}
       >
         <div className="flex flex-col items-center justify-center gap-4">
-          {file ? (
+          {loading ? (
+            <Loader />
+          ) : file ? (
             <>
               <Image
                 src="/assets/CheckCircle.svg"
@@ -70,9 +78,10 @@ const DragAndDropFile = ({
                 width={40}
                 height={40}
                 style={{
-                  maxWidth: "100%",
-                  height: "auto"
-                }} />
+                  maxWidth: '100%',
+                  height: 'auto',
+                }}
+              />
               <div className="flex flex-col items-center text-base font-semibold">
                 <p className="text-grey-800">
                   {file.name} <span className="text-grey-700">(Uploaded)</span>
@@ -87,11 +96,15 @@ const DragAndDropFile = ({
                       width={16}
                       height={16}
                       style={{
-                        maxWidth: "100%",
-                        height: "auto"
-                      }} />
+                        maxWidth: '100%',
+                        height: 'auto',
+                      }}
+                    />
                   }
-                  onClick={() => {
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    
                     setFile(null);
                   }}
                 >
@@ -107,9 +120,10 @@ const DragAndDropFile = ({
                 width={40}
                 height={40}
                 style={{
-                  maxWidth: "100%",
-                  height: "auto"
-                }} />
+                  maxWidth: '100%',
+                  height: 'auto',
+                }}
+              />
               <div className="flex flex-col items-center text-base font-semibold">
                 <p className="text-brand-400">
                   Click to upload <span className="text-grey-700">or drag and drop</span>
@@ -138,7 +152,7 @@ const DragAndDropFile = ({
           {errorMessage || helpText}
         </p>
       ) : null}{' '}
-    </div>)
+    </div>
   );
 };
 

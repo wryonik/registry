@@ -5,13 +5,14 @@ import {
   BlueprintProps,
   DecomposedRegex,
   DecomposedRegexPart,
-  Status,
+  ValidationErrors,
+  ZkFramework,
+  ZodError,
 } from '@zk-email/sdk';
 import { create } from 'zustand';
-import { z } from 'zod';
-import { blueprintFormSchema } from './blueprintFormSchema';
 import { persist } from 'zustand/middleware';
 import posthog from 'posthog-js';
+import { getFileContent } from '@/lib/utils';
 
 type CreateBlueprintState = BlueprintProps & {
   blueprint: Blueprint | null;
@@ -21,7 +22,7 @@ type CreateBlueprintState = BlueprintProps & {
   validateAll: () => boolean;
   getParsedDecomposedRegexes: () => DecomposedRegex[];
   setToExistingBlueprint: (id: string) => void;
-  compile: () => Promise<void>;
+  compile: () => Promise<string>;
   saveDraft: () => Promise<string>;
   reset: () => void;
   file: File | null;
@@ -45,17 +46,15 @@ const initialState: BlueprintProps = {
   senderDomain: '',
   enableHeaderMasking: false,
   enableBodyMasking: false,
-  isPublic: false,
+  isPublic: true,
   verifierContract: {
     chain: 84532,
     address: '',
   },
   externalInputs: [],
   decomposedRegexes: [],
-};
-
-export type ValidationErrors = {
-  [K in keyof z.infer<typeof blueprintFormSchema>]?: string;
+  clientZkFramework: ZkFramework.Circom,
+  serverZkFramework: ZkFramework.Circom,
 };
 
 export const useCreateBlueprintStore = create<CreateBlueprintState>()(
@@ -76,7 +75,7 @@ export const useCreateBlueprintStore = create<CreateBlueprintState>()(
         const state = get();
         try {
           // @ts-ignore
-          const fieldSchema = blueprintFormSchema.shape[field];
+          const fieldSchema = Blueprint.formSchema.shape[field];
           if (fieldSchema) {
             fieldSchema.parse(state[field]);
             set((prev) => ({
@@ -87,7 +86,7 @@ export const useCreateBlueprintStore = create<CreateBlueprintState>()(
             }));
           }
         } catch (error) {
-          if (error instanceof z.ZodError) {
+          if (error instanceof ZodError) {
             set((prev) => ({
               validationErrors: {
                 ...prev.validationErrors,
@@ -101,12 +100,12 @@ export const useCreateBlueprintStore = create<CreateBlueprintState>()(
       validateAll: () => {
         const state = get();
         try {
-          blueprintFormSchema.parse(state);
+          Blueprint.formSchema.parse(state);
           set({ validationErrors: {} });
           return true;
         } catch (error) {
           console.log('Validation error: ', error);
-          if (error instanceof z.ZodError) {
+          if (error instanceof ZodError) {
             const errors: ValidationErrors = {};
             error.errors.forEach((err) => {
               const path = err.path[0] as keyof BlueprintProps;
@@ -121,7 +120,7 @@ export const useCreateBlueprintStore = create<CreateBlueprintState>()(
 
       getParsedDecomposedRegexes: (): DecomposedRegex[] => {
         const decomposedRegexes = get().decomposedRegexes;
-        return get().decomposedRegexes.map((dcr) => {
+        return decomposedRegexes.map((dcr) => {
           const parts =
             typeof dcr.parts === 'string'
               ? (JSON.parse((dcr.parts as unknown as string).trim()) as DecomposedRegexPart[])
@@ -134,6 +133,12 @@ export const useCreateBlueprintStore = create<CreateBlueprintState>()(
       },
       saveDraft: async (): Promise<string> => {
         const state = get();
+        const savedEmls = JSON.parse(localStorage.getItem('blueprintEmls') || '{}');
+
+        // Page logic should already prevent saving a draft without having a file
+        // if (!state.file && !savedEmls[state.id ?? 'new']) {
+        //   throw new Error('Can only save a draft with an example email provided');
+        // }
 
         // Remove functions from the state data and clone
         const data = JSON.parse(
@@ -165,18 +170,29 @@ export const useCreateBlueprintStore = create<CreateBlueprintState>()(
 
         try {
           console.log('saving draft with state: ', state);
+          console.log('getting email content');
+          let emlStr = '';
+          if (state.file) {
+            emlStr = await getFileContent(state.file);
+          } else {
+            emlStr = savedEmls[state.id ?? 'new'];
+          }
+          console.log('got email content');
           // Create a new blueprint
           if (!state.id || state.id === 'new') {
             console.log('creating a new blueprint');
             const blueprint = sdk.createBlueprint(data);
+            await blueprint.assignPreferredZkFramework(emlStr);
+            console.log('Assigned clientZkFramework: ', blueprint.props.clientZkFramework);
+            console.log('Assigned serverZkFramework: ', blueprint.props.serverZkFramework);
             await blueprint.submitDraft();
+            console.log('saved draft');
             set({ blueprint });
             return blueprint.props.id!;
           }
 
           // Update an existing blueprint
           if (state.blueprint && state.blueprint.canUpdate()) {
-            console.log('updating');
             await state.blueprint.update(data);
             return state.blueprint.props.id!;
           }
@@ -198,9 +214,9 @@ export const useCreateBlueprintStore = create<CreateBlueprintState>()(
         try {
           console.log('setting existing blueprint');
           const blueprint = await sdk.getBlueprintById(id);
-          blueprint?.props?.decomposedRegexes?.forEach((dcr) => {
-            dcr.parts = JSON.stringify(dcr.parts) as unknown as DecomposedRegexPart[];
-          });
+          // blueprint?.props?.decomposedRegexes?.forEach((dcr) => {
+          //   dcr.parts = JSON.stringify(dcr.parts) as unknown as DecomposedRegexPart[];
+          // });
 
           // TODO: sdk should not return undefined fields - workaround so we have sane defaults
           for (const [key, value] of Object.entries(blueprint.props)) {
@@ -219,7 +235,7 @@ export const useCreateBlueprintStore = create<CreateBlueprintState>()(
           throw err;
         }
       },
-      compile: async (): Promise<void> => {
+      compile: async (): Promise<string> => {
         const state = get();
 
         posthog.capture('$compile_blueprint', {
@@ -231,8 +247,13 @@ export const useCreateBlueprintStore = create<CreateBlueprintState>()(
           state.emailBodyMaxLength = 0;
         }
 
-        if (!state.validateAll()) {
-          throw new Error('Validation failed');
+        try {
+          if (!state.validateAll()) {
+            throw new Error('Validation failed');
+          }
+        } catch (err) {
+          console.error('Validation failed: ', err);
+          throw err;
         }
         // In theory we could also save before compiling here if we want, caling createBlueprint first
         if (!state.blueprint) {
@@ -245,12 +266,15 @@ export const useCreateBlueprintStore = create<CreateBlueprintState>()(
           throw err;
         }
 
-        // const status = await state.blueprint.checkStatus()
-
-        window.location.href = '/';
+        return state.blueprint.props.id!;
       },
       reset: () => {
-        return set({ ...(JSON.parse(JSON.stringify(initialState)) as BlueprintProps), file: null });
+        return set({
+          ...(JSON.parse(JSON.stringify(initialState)) as BlueprintProps),
+          file: null,
+          blueprint: null,
+          validationErrors: {},
+        });
       },
       setFile: (file: File | null) => {
         set({ file });
